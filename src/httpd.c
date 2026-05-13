@@ -140,8 +140,7 @@ static void serve_file(signed char sock, int head_only)
 {
     unsigned char fh;
     unsigned short n;
-    long size;
-    char hdr[192];
+    char hdr[128];
 
     fh = File_Open(_symbank, g_fspath);
     if (fh == 0) {
@@ -149,16 +148,13 @@ static void serve_file(signed char sock, int head_only)
         return;
     }
 
-    size = File_Seek(fh, 0L, SEEK_END);
-    if (size < 0) size = 0;
-    File_Seek(fh, 0L, SEEK_SET);
-
+    /* HTTP/1.0 + Connection: close: body ends when connection closes.
+     * No Content-Length needed; avoids File_Seek(SEEK_END) unreliability. */
     sprintf(hdr,
         "HTTP/1.0 200 OK\r\n"
         "Content-Type: %s\r\n"
-        "Content-Length: %ld\r\n"
         "Connection: close\r\n\r\n",
-        mime_type(g_fspath), size);
+        mime_type(g_fspath));
     tcp_puts(sock, hdr);
 
     if (!head_only) {
