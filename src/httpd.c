@@ -276,7 +276,6 @@ static void handle_request(signed char sock)
 int main(int argc, char *argv[])
 {
     signed char sock;
-    NetStat ns;
 
     g_port = HTTP_PORT;
     g_docroot[0] = '\0';
@@ -307,27 +306,25 @@ int main(int argc, char *argv[])
     printf("\r\n");
 
     /* --- Server loop: one connection at a time --- */
+    printf("Waiting for connection...\r\n");
     for (;;) {
+        /*
+         * TCP_OpenServer is listen+accept combined: it sends TCPOPN to the
+         * daemon, then internally waits for a NET_TCPEVT TCP_OPENED event.
+         * If no client connects before its internal timeout it returns -1
+         * with _neterr = ERR_CONNECT (24).  Just retry in that case.
+         */
         sock = TCP_OpenServer(g_port);
         if (sock < 0) {
+            if (_neterr == ERR_CONNECT) continue;   /* timeout, keep waiting */
             printf("Error: cannot open server socket (err %u)\r\n",
                    (unsigned int)_neterr);
             Net_ErrMsg(0);
             return 1;
         }
 
-        printf("Waiting for connection...\r\n");
-
-        /* Wait until a client connects (TCP_OPENED event) */
-        for (;;) {
-            _symmsg[0] = 0;
-            Msg_Sleep(_sympid, _netpid, _symmsg);
-            if (_symmsg[0] != NET_TCPEVT) continue;
-            TCP_Event(_symmsg, &ns);
-            if (ns.socket == (unsigned char)sock && ns.status == TCP_OPENED)
-                break;
-        }
-
+        /* TCP_OpenServer already consumed the TCP_OPENED event internally.
+         * The connection is established; go straight to reading the request. */
         printf("Connected\r\n");
         handle_request(sock);
 
