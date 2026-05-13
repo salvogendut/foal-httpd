@@ -277,8 +277,6 @@ int main(int argc, char *argv[])
 {
     signed char sock;
     NetStat ns;
-    char ip[4];
-    char ip_str[16];
 
     g_port = HTTP_PORT;
     g_docroot[0] = '\0';
@@ -299,12 +297,7 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    if (Net_PublicIP(ip) == 0) {
-        iptoa(ip, ip_str);
-        printf("Address : http://%s:%u/\r\n", ip_str, (unsigned int)g_port);
-    } else {
-        printf("Port    : %u\r\n", (unsigned int)g_port);
-    }
+    printf("Port    : %u\r\n", (unsigned int)g_port);
 
     if (g_docroot[0])
         printf("Root    : %s\r\n", g_docroot);
@@ -317,7 +310,9 @@ int main(int argc, char *argv[])
     for (;;) {
         sock = TCP_OpenServer(g_port);
         if (sock < 0) {
-            printf("Error: cannot open server socket\r\n");
+            printf("Error: cannot open server socket (err %u)\r\n",
+                   (unsigned int)_neterr);
+            Net_ErrMsg(0);
             return 1;
         }
 
