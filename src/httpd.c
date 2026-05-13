@@ -142,8 +142,10 @@ static void serve_file(signed char sock, int head_only)
     unsigned short n;
     char hdr[128];
 
+    printf("open: %s\r\n", g_fspath);
     fh = File_Open(_symbank, g_fspath);
-    if (fh == 0) {
+    if (_fileerr) {
+        printf("open err %u\r\n", (unsigned int)_fileerr);
         resp_404(sock);
         return;
     }
