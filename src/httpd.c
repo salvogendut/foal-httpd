@@ -38,6 +38,10 @@ static char g_urlpath[PATH_SIZE];
 static char g_fspath[FSPATH_SIZE];
 static char g_docroot[PATH_SIZE];
 static unsigned short g_port;
+static unsigned char g_keep_fh;     /* open handle held to suppress media reload */
+static char g_warmpath[FSPATH_SIZE]; /* path to default doc */
+static char page_buf[FILE_BUF_SIZE]; /* startup-cached default document body */
+static unsigned short page_size;     /* bytes in page_buf (0 = not cached) */
 
 /* ------------------------------------------------------------------ */
 /* Helpers                                                             */
@@ -75,35 +79,13 @@ static void tcp_puts(signed char sock, const char *s)
     if (n) TCP_Send(sock, _symbank, (char *)s, n);
 }
 
-/* Build filesystem path: g_docroot + url_path (/ -> \) into g_fspath */
+/* Build absolute SymbOS filesystem path from URL path into g_fspath.
+ * Dir_PathAdd: null base → app's directory; handles / → \ conversion. */
 static void make_fspath(const char *url_path)
 {
-    unsigned int n;
-    char *p;
-
-    if (g_docroot[0]) {
-        strncpy(g_fspath, g_docroot, FSPATH_SIZE - 1);
-        g_fspath[FSPATH_SIZE - 1] = '\0';
-        n = (unsigned int)strlen(g_fspath);
-        if (n > 0 && g_fspath[n-1] != '\\' && n < FSPATH_SIZE - 2) {
-            g_fspath[n]   = '\\';
-            g_fspath[n+1] = '\0';
-        }
-        /* skip leading '/' from URL path */
-        p = (char *)url_path;
-        if (*p == '/') p++;
-        strncat(g_fspath, p, FSPATH_SIZE - (unsigned int)strlen(g_fspath) - 1);
-    } else {
-        /* No docroot: use URL path relative to current directory */
-        p = (char *)url_path;
-        if (*p == '/') p++;
-        strncpy(g_fspath, p, FSPATH_SIZE - 1);
-        g_fspath[FSPATH_SIZE - 1] = '\0';
-    }
-
-    /* Forward slashes -> backslashes for SymbOS filesystem */
-    for (p = g_fspath; *p; p++)
-        if (*p == '/') *p = '\\';
+    char *p = (char *)url_path;
+    if (*p == '/') p++;
+    Dir_PathAdd(g_docroot[0] ? g_docroot : 0, p, g_fspath);
 }
 
 /* ------------------------------------------------------------------ */
@@ -112,35 +94,38 @@ static void make_fspath(const char *url_path)
 
 static void resp_400(signed char sock)
 {
-    tcp_puts(sock, "HTTP/1.0 400 Bad Request\r\nConnection: close\r\n\r\n");
+    strcpy(file_buf, "HTTP/1.0 400 Bad Request\r\nConnection: close\r\n\r\n");
+    TCP_Send(sock, _symbank, file_buf, (unsigned short)strlen(file_buf));
 }
 
 static void resp_404(signed char sock)
 {
     static const char body[] =
         "<html><body><h1>404 Not Found</h1></body></html>\r\n";
-    char hdr[128];
-    sprintf(hdr,
+    sprintf(file_buf,
         "HTTP/1.0 404 Not Found\r\n"
         "Content-Type: text/html\r\n"
         "Content-Length: %u\r\n"
         "Connection: close\r\n\r\n",
         (unsigned int)strlen(body));
-    tcp_puts(sock, hdr);
-    tcp_puts(sock, body);
+    TCP_Send(sock, _symbank, file_buf, (unsigned short)strlen(file_buf));
+    strcpy(file_buf, body);
+    TCP_Send(sock, _symbank, file_buf, (unsigned short)strlen(file_buf));
 }
 
 static void resp_501(signed char sock)
 {
-    tcp_puts(sock, "HTTP/1.0 501 Not Implemented\r\nConnection: close\r\n\r\n");
+    strcpy(file_buf, "HTTP/1.0 501 Not Implemented\r\nConnection: close\r\n\r\n");
+    TCP_Send(sock, _symbank, file_buf, (unsigned short)strlen(file_buf));
 }
 
-/* Open g_fspath, send headers + body (or headers only if head_only). */
+/* Open g_fspath, send headers + body (or headers only if head_only).
+ * No Dir_ReadRaw, no File_Seek — stream until File_Read returns 0 (EOF). */
 static void serve_file(signed char sock, int head_only)
 {
     unsigned char fh;
     unsigned short n;
-    char hdr[128];
+    unsigned short total;
 
     printf("open: %s\r\n", g_fspath);
     fh = File_Open(_symbank, g_fspath);
@@ -149,20 +134,37 @@ static void serve_file(signed char sock, int head_only)
         resp_404(sock);
         return;
     }
+    printf("fh=%u\r\n", (unsigned int)fh);
+    /* Reset position to 0: per-path position may be non-zero from a prior
+     * keepalive read of the same file.  SEEK_SET without SEEK_END is safe. */
+    File_Seek(fh, 0, SEEK_SET);
 
-    /* HTTP/1.0 + Connection: close: body ends when connection closes.
-     * No Content-Length needed; avoids File_Seek(SEEK_END) unreliability. */
-    sprintf(hdr,
+    sprintf(file_buf,
         "HTTP/1.0 200 OK\r\n"
         "Content-Type: %s\r\n"
         "Connection: close\r\n\r\n",
         mime_type(g_fspath));
-    tcp_puts(sock, hdr);
+    n = (unsigned short)strlen(file_buf);
+    TCP_Send(sock, _symbank, file_buf, n);
 
     if (!head_only) {
-        while ((n = File_Read(fh, _symbank, file_buf, FILE_BUF_SIZE)) > 0) {
-            if (TCP_Send(sock, _symbank, file_buf, n) != 0)
-                break;
+        printf("ps=%u eq=%d\r\n", page_size, strcmp(g_fspath, g_warmpath));
+        if (page_size > 0 && strcmp(g_fspath, g_warmpath) == 0) {
+            /* Serve from startup RAM cache — no per-request disk access */
+            TCP_Send(sock, _symbank, page_buf, page_size);
+            printf("sent from cache: %u\r\n", (unsigned int)page_size);
+        } else {
+            total = 0;
+            File_Seek(fh, 0, SEEK_SET);
+            for (;;) {
+                n = File_Read(fh, _symbank, file_buf, FILE_BUF_SIZE);
+                printf("rd=%u\r\n", (unsigned int)n);
+                if (n == 0) break;
+                total += n;
+                if (TCP_Send(sock, _symbank, file_buf, n) != 0)
+                    break;
+            }
+            printf("sent %u\r\n", total);
         }
     }
 
@@ -254,7 +256,7 @@ static void handle_request(signed char sock)
 
     /* Default document */
     if (g_urlpath[0] == '\0' || strcmp(g_urlpath, "/") == 0)
-        strcpy(g_urlpath, "/index.html");
+        strcpy(g_urlpath, "/index.htm");
 
     /* Directory traversal guard */
     if (!path_safe(g_urlpath)) {
@@ -274,6 +276,8 @@ static void handle_request(signed char sock)
 int main(int argc, char *argv[])
 {
     signed char sock;
+    unsigned char wfh;
+    int c;
 
     g_port = HTTP_PORT;
     g_docroot[0] = '\0';
@@ -301,9 +305,48 @@ int main(int argc, char *argv[])
     else
         printf("Root    : (current directory)\r\n");
 
+    /*
+     * Keep one file handle open for the server's lifetime.
+     * SymbOS performs a "media reload" (re-reads the FAT) before every
+     * File_Open on a removeable-media device when no file on that device is
+     * currently open.  Holding one handle open suppresses this reload on
+     * every HTTP request.  Opening the server's own executable (argv[0])
+     * is always safe and guaranteed to be on the same drive.
+     */
+    g_keep_fh = File_Open(_symbank, argv[0]);
+    if (!_fileerr)
+        printf("Drive   : live (fh %u)\r\n", (unsigned int)g_keep_fh);
+    else
+        printf("Drive   : keep-alive failed (%u)\r\n", (unsigned int)_fileerr);
+
+    /* Build path to the default document (index.htm) for data-cluster keepalive.
+     * argv[0] File_Read returns 0 immediately (SymbOS skips reads on loaded code);
+     * index.htm has real data clusters that actually touch the USB drive. */
+    make_fspath("/index.htm");
+    strncpy(g_warmpath, g_fspath, FSPATH_SIZE - 1);
+    g_warmpath[FSPATH_SIZE - 1] = '\0';
+    g_fspath[0] = '\0';
+    printf("Warmpath: %s\r\n", g_warmpath);
+
+    /* Read index.htm into RAM while drive is fresh.  Requests are then served
+     * from page_buf without any per-request File_Read disk access. */
+    wfh = File_Open(_symbank, g_warmpath);
+    if (!_fileerr) {
+        File_Seek(wfh, 0, SEEK_SET);
+        page_size = File_Read(wfh, _symbank, page_buf, FILE_BUF_SIZE);
+        File_Close(wfh);
+        printf("Cached  : %u bytes\r\n", (unsigned int)page_size);
+    }
+
+    printf("Shell   : pid=%u ver=%u\r\n",
+           (unsigned int)_shellpid, (unsigned int)_shellver);
     printf("\r\n");
 
     /* --- Server loop: one connection at a time --- */
+    if (_shellver >= 23)
+        printf("Press Q to exit.\r\n");
+    else
+        printf("Exit via task manager (SymShell < 2.3).\r\n");
     printf("Waiting for connection...\r\n");
     for (;;) {
         /*
@@ -314,7 +357,19 @@ int main(int argc, char *argv[])
          */
         sock = TCP_OpenServer(g_port);
         if (sock < 0) {
-            if (_neterr == ERR_CONNECT) continue;   /* timeout, keep waiting */
+            if (_neterr == ERR_CONNECT) {
+                /* Open+seek(0)+read+close index.htm to keep USB drive spinning.
+                 * SEEK_SET resets per-path position so File_Read hits real data. */
+                wfh = File_Open(_symbank, g_warmpath);
+                if (!_fileerr) {
+                    File_Seek(wfh, 0, SEEK_SET);
+                    File_Read(wfh, _symbank, file_buf, FILE_BUF_SIZE);
+                    File_Close(wfh);
+                }
+                c = Shell_CharTest(0, 1);
+                if (c == 'Q' || c == 'q') break;
+                continue;
+            }
             printf("Error: cannot open server socket (err %u)\r\n",
                    (unsigned int)_neterr);
             Net_ErrMsg(0);
@@ -335,7 +390,13 @@ int main(int argc, char *argv[])
             TCP_Close(sock);
 
         printf("Done\r\n\r\n");
+
+        /* check for quit after each served request too */
+        c = Shell_CharTest(0, 1);
+        if (c == 'Q' || c == 'q') break;
     }
 
+    File_Close(g_keep_fh);
+    printf("Bye.\r\n");
     return 0;
 }
