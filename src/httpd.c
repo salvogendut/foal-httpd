@@ -17,6 +17,8 @@
 #include <stdlib.h>
 #include <network.h>
 #include <symbos.h>
+#include <symbos/proc.h>
+#include <symbos/systray.h>
 
 /* ------------------------------------------------------------------ */
 /* Sizes                                                               */
@@ -57,6 +59,14 @@ static char g_docroot[PATH_SIZE];
 static char g_dirpath[FSPATH_SIZE];  /* wildcard scan path: docroot\*.* */
 static unsigned short g_port;
 static unsigned char g_keep_fh;
+static signed char g_tray_id = -1;
+
+/* 4-colour 8x8 systray icon: {mode=2, w=8, h=8, 16 bytes CPC mode-1 pixels} */
+static const char g_tray_icon[19] = {
+    2, 8, 8,
+    '\xf0','\x0f','\xf6','\x0f','\xf0','\x5d','\x4f','\xaf',
+    '\x5f','\x2f','\xab','\xf0','\x0f','\xf6','\x0f','\xf0'
+};
 
 /* ------------------------------------------------------------------ */
 /* Helpers                                                             */
@@ -347,6 +357,7 @@ int main(int argc, char *argv[])
 {
     signed char sock;
     int c;
+    unsigned short mresp;
 
     g_port = HTTP_PORT;
     g_docroot[0] = '\0';
@@ -361,6 +372,13 @@ int main(int argc, char *argv[])
     }
 
     printf("foal-httpd for SymbOS\r\n");
+
+    /* Prevent double launch */
+    if (App_Search(_symbank, "foal-httpd") != 0) {
+        printf("Already running.\r\n");
+        return 1;
+    }
+    App_Service(_symbank, "foal-httpd");
 
     if (Net_Init() < 0) {
         printf("Error: network daemon not found\r\n");
@@ -387,27 +405,37 @@ int main(int argc, char *argv[])
     /* Keep-alive handle no longer needed after load. */
     File_Close(g_keep_fh);
 
+    /* Add systray icon so foal-httpd appears as a running service. */
+    g_tray_id = Systray_Add(_symbank, (char *)g_tray_icon, 0);
+
     printf("Shell   : pid=%u ver=%u\r\n",
            (unsigned int)_shellpid, (unsigned int)_shellver);
     printf("\r\n");
 
-    if (_shellver >= 23)
+    if (_shellpid)
         printf("Press Q to exit.\r\n");
     else
-        printf("Exit via task manager (SymShell < 2.3).\r\n");
+        printf("Running as daemon. Use task manager to exit.\r\n");
     printf("Waiting for connection...\r\n");
 
     for (;;) {
         sock = TCP_OpenServer(g_port);
         if (sock < 0) {
             if (_neterr == ERR_CONNECT) {
-                c = Shell_CharTest(0, 1);
-                if (c == 'Q' || c == 'q') break;
+                /* Poll for OS quit message (non-blocking). */
+                mresp = Msg_Receive(_sympid, -1, _symmsg);
+                if ((mresp & 1) && _symmsg[0] == 0) break;
+                /* Also allow Q from shell. */
+                if (_shellpid) {
+                    c = Shell_CharTest(0, 1);
+                    if (c == 'Q' || c == 'q') break;
+                }
                 continue;
             }
             printf("Error: cannot open server socket (err %u)\r\n",
                    (unsigned int)_neterr);
             Net_ErrMsg(0);
+            if (g_tray_id >= 0) Systray_Remove((unsigned char)g_tray_id);
             return 1;
         }
 
@@ -419,10 +447,16 @@ int main(int argc, char *argv[])
 
         printf("Done\r\n\r\n");
 
-        c = Shell_CharTest(0, 1);
-        if (c == 'Q' || c == 'q') break;
+        /* Poll for OS quit message (non-blocking). */
+        mresp = Msg_Receive(_sympid, -1, _symmsg);
+        if ((mresp & 1) && _symmsg[0] == 0) break;
+        if (_shellpid) {
+            c = Shell_CharTest(0, 1);
+            if (c == 'Q' || c == 'q') break;
+        }
     }
 
+    if (g_tray_id >= 0) Systray_Remove((unsigned char)g_tray_id);
     printf("Bye.\r\n");
     return 0;
 }
