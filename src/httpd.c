@@ -54,6 +54,7 @@ static char g_method[8];
 static char g_urlpath[PATH_SIZE];
 static char g_fspath[FSPATH_SIZE];
 static char g_docroot[PATH_SIZE];
+static char g_dirpath[FSPATH_SIZE];  /* wildcard scan path: docroot\*.* */
 static unsigned short g_port;
 static unsigned char g_keep_fh;
 
@@ -144,38 +145,70 @@ static void resp_501(signed char sock)
 /* Startup: load all files from docroot into RAM                       */
 /* ------------------------------------------------------------------ */
 
-/* Preload list — try each URL path at startup; cache whatever opens. */
-static const char * const preload_urls[] = {
-    "/index.htm",
-    "/index.html",
-    "/style.css",
-    "/styles.css",
-    "/main.css",
-    "/script.js",
-    "/main.js",
-    "/app.js",
-    "/favicon.ico",
-    "/logo.gif",
-    "/logo.png",
-    "/logo.jpg",
-    "/404.htm",
-    0
-};
-
 static void load_directory(void)
 {
+    int count;
+    int i;
+    unsigned char fattrib;
+    char *p;
+    char *fname;
+    unsigned short namelen;
     unsigned char fh;
     unsigned short n;
     unsigned short chunk;
     unsigned short room;
-    unsigned char i;
+    unsigned char ci;
+    unsigned short dlen;
 
-    for (i = 0; preload_urls[i] && g_nfiles < MAX_FILES; i++) {
+    /* Build wildcard path: docroot\*.* (or app dir\*.* if no docroot) */
+    if (g_docroot[0]) {
+        strncpy(g_dirpath, g_docroot, FSPATH_SIZE - 5);
+        g_dirpath[FSPATH_SIZE - 5] = '\0';
+        dlen = (unsigned short)strlen(g_dirpath);
+        if (dlen > 0 && g_dirpath[dlen - 1] == '\\') g_dirpath[dlen - 1] = '\0';
+        strcat(g_dirpath, "\\*.*");
+    } else {
+        Dir_PathAdd(0, "*.*", g_dirpath);
+    }
+
+    printf("Scan %s\r\n", g_dirpath);
+
+    count = Dir_ReadRaw(_symbank, g_dirpath,
+                        ATTRIB_DIR | ATTRIB_VOLUME,
+                        _symbank, req_buf, REQ_BUF_SIZE, 0);
+
+    printf("Dir: count=%d err=%u\r\n", count, (unsigned int)_fileerr);
+
+    if (count <= 0) {
+        printf("Store: 0 bytes, 0 files\r\n");
+        return;
+    }
+
+    p = req_buf;
+    for (i = 0; i < count && g_nfiles < MAX_FILES; i++) {
+        /* raw entry: 4 bytes len + 4 bytes time + 1 byte attrib + name\0 */
+        fattrib = (unsigned char)p[8];
+        fname   = p + 9;
+        namelen = (unsigned short)strlen(fname);
+
+        /* advance pointer past this entry */
+        p += 9 + namelen + 1;
+
+        /* skip directories and volume labels */
+        if (fattrib & ATTRIB_DIR) continue;
+
+        /* lowercase filename in place */
+        for (ci = 0; fname[ci]; ci++) {
+            if (fname[ci] >= 'A' && fname[ci] <= 'Z')
+                fname[ci] += 32;
+        }
+        /* fname[] is inside req_buf which we own — safe to mutate before File_Open */
+
         if (store_used >= STORE_SIZE) break;
 
-        make_fspath(preload_urls[i]);
+        Dir_PathAdd(g_docroot[0] ? g_docroot : 0, fname, g_fspath);
         fh = File_Open(_symbank, g_fspath);
-        if (_fileerr) continue;   /* file not present — skip silently */
+        if (_fileerr) continue;
 
         File_Seek(fh, 0, SEEK_SET);
         n = 0;
@@ -194,7 +227,7 @@ static void load_directory(void)
         g_files[g_nfiles].size   = n;
         store_used += n;
         g_nfiles++;
-        printf("Cached %s: %u bytes\r\n", preload_urls[i], n);
+        printf("Cached %s: %u bytes\r\n", fname, n);
     }
 
     printf("Store: %u bytes, %u files\r\n", store_used, (unsigned int)g_nfiles);

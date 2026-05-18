@@ -48,18 +48,7 @@ Run from SymShell. The server preloads all known files at startup and logs each 
 
 ## Preloaded files
 
-The server attempts to load the following filenames from the docroot at startup. Any that exist are cached in an 8 KB RAM pool and served from memory:
-
-```
-index.htm
-style.css / styles.css / main.css
-script.js / main.js / app.js
-favicon.ico
-logo.gif / logo.png / logo.jpg
-404.htm
-```
-
-Files not in this list return 404. To add more, extend `preload_urls[]` in `src/httpd.c`.
+At startup the server enumerates every file in the docroot with `Dir_ReadRaw` and caches them all in the 8 KB RAM pool. Any file present in the docroot directory is served; files not found there return 404. The pool fits roughly 8 KB of content in total (`STORE_SIZE` in `src/httpd.c`).
 
 ## Sample site
 
