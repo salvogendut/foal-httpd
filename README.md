@@ -62,11 +62,11 @@ A minimal example site is in `www/`:
 
 ```
 www/
-  index.htm   — sample HTML page
-  logo.jpg    — sample logo image
+  index.htm   — sample HTML page (logo embedded as base64 data URI)
+  logo.jpg    — source image (already embedded; not needed on the server)
 ```
 
-Copy the contents of `www/` to your SymbOS docroot (e.g. `C:\WWW\`) before starting the server.
+Copy `www/index.htm` to your SymbOS docroot (e.g. `C:\WWW\`) before starting the server. The logo is embedded directly in the HTML as a base64 data URI, so the browser fetches the complete page — including the image — in a single HTTP request. This avoids the `ERR_CONNECTION_REFUSED` errors that would otherwise occur when a browser fires parallel asset requests against a single-connection HTTP/1.0 server.
 
 ## Notes
 
