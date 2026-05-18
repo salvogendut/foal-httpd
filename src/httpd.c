@@ -155,6 +155,9 @@ static const char * const preload_urls[] = {
     "/main.js",
     "/app.js",
     "/favicon.ico",
+    "/logo.gif",
+    "/logo.png",
+    "/logo.jpg",
     "/404.htm",
     0
 };
@@ -163,6 +166,8 @@ static void load_directory(void)
 {
     unsigned char fh;
     unsigned short n;
+    unsigned short chunk;
+    unsigned short room;
     unsigned char i;
 
     for (i = 0; preload_urls[i] && g_nfiles < MAX_FILES; i++) {
@@ -173,7 +178,13 @@ static void load_directory(void)
         if (_fileerr) continue;   /* file not present — skip silently */
 
         File_Seek(fh, 0, SEEK_SET);
-        n = File_Read(fh, _symbank, file_store + store_used, STORE_SIZE - store_used);
+        n = 0;
+        do {
+            room = STORE_SIZE - store_used - n;
+            if (room == 0) break;
+            chunk = File_Read(fh, _symbank, file_store + store_used + n, room);
+            n += chunk;
+        } while (chunk > 0);
         File_Close(fh);
 
         if (n == 0) continue;
