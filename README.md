@@ -1,3 +1,4 @@
+![Example Image](foal-httpd.png)
 # foal-httpd
 
 Minimal HTTP/1.0 static file server for [SymbOS](http://symbos.org), written in C using the [SCC compiler](https://github.com/danielgaskell/scc).
