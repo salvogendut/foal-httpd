@@ -56,17 +56,11 @@ static char g_method[8];
 static char g_urlpath[PATH_SIZE];
 static char g_fspath[FSPATH_SIZE];
 static char g_docroot[PATH_SIZE];
-static char g_dirpath[FSPATH_SIZE];  /* wildcard scan path: docroot\*.* */
 static unsigned short g_port;
 static unsigned char g_keep_fh;
-static signed char g_tray_id = -1;
-
-/* 4-colour 8x8 systray icon: {mode=2, w=8, h=8, 16 bytes CPC mode-1 pixels} */
-static const char g_tray_icon[19] = {
-    2, 8, 8,
-    '\xf0','\x0f','\xf6','\x0f','\xf0','\x5d','\x4f','\xaf',
-    '\x5f','\x2f','\xab','\xf0','\x0f','\xf6','\x0f','\xf0'
-};
+static char g_dirbuf[1024];
+static signed char g_tray_id;
+static char g_tray_icon[19];
 
 /* ------------------------------------------------------------------ */
 /* Helpers                                                             */
@@ -155,12 +149,16 @@ static void resp_501(signed char sock)
 /* Startup: load all files from docroot into RAM                       */
 /* ------------------------------------------------------------------ */
 
+extern unsigned char File_Command(void);
+
 static void load_directory(void)
 {
+    char searchpath[60];    /* local stack var — transfer area, always _symbank */
+    unsigned short plen;
     int count;
     int i;
+    char *raw;
     unsigned char fattrib;
-    char *p;
     char *fname;
     unsigned short namelen;
     unsigned char fh;
@@ -168,24 +166,39 @@ static void load_directory(void)
     unsigned short chunk;
     unsigned short room;
     unsigned char ci;
-    unsigned short dlen;
 
-    /* Build wildcard path: docroot\*.* (or app dir\*.* if no docroot) */
+    /* Build wildcard path into stack-local buffer */
     if (g_docroot[0]) {
-        strncpy(g_dirpath, g_docroot, FSPATH_SIZE - 5);
-        g_dirpath[FSPATH_SIZE - 5] = '\0';
-        dlen = (unsigned short)strlen(g_dirpath);
-        if (dlen > 0 && g_dirpath[dlen - 1] == '\\') g_dirpath[dlen - 1] = '\0';
-        strcat(g_dirpath, "\\*.*");
+        strncpy(searchpath, g_docroot, 52);
+        searchpath[52] = '\0';
+        plen = (unsigned short)strlen(searchpath);
+        if (plen > 0 && searchpath[plen - 1] == '\\') searchpath[--plen] = '\0';
+        if (plen < 56) { searchpath[plen] = '\\'; searchpath[plen + 1] = '\0'; plen++; }
     } else {
-        Dir_PathAdd(0, "*.*", g_dirpath);
+        Dir_PathAdd(0, "", searchpath);
+        plen = (unsigned short)strlen(searchpath);
+    }
+    if (plen < 56) {
+        searchpath[plen]     = '*';
+        searchpath[plen + 1] = '.';
+        searchpath[plen + 2] = '*';
+        searchpath[plen + 3] = '\0';
     }
 
-    printf("Scan %s\r\n", g_dirpath);
+    printf("Scan %s\r\n", searchpath);
 
-    count = Dir_ReadRaw(_symbank, g_dirpath,
-                        ATTRIB_DIR | ATTRIB_VOLUME,
-                        _symbank, req_buf, REQ_BUF_SIZE, 0);
+    _msemaon();
+    _symmsg[1]  = 38;
+    _symmsg[3]  = _symbank;
+    *((unsigned short*)(_symmsg + 4)) = (unsigned short)sizeof(g_dirbuf);
+    *((char**)(_symmsg + 6)) = g_dirbuf;
+    *((char**)(_symmsg + 8)) = searchpath;
+    _symmsg[10] = ATTRIB_DIR | ATTRIB_VOLUME;
+    _symmsg[11] = _symbank;
+    *((unsigned short*)(_symmsg + 12)) = 0;
+    File_Command();
+    count = *((int*)(_symmsg + 8));
+    _msemaoff();
 
     printf("Dir: count=%d err=%u\r\n", count, (unsigned int)_fileerr);
 
@@ -194,33 +207,24 @@ static void load_directory(void)
         return;
     }
 
-    p = req_buf;
+    raw = g_dirbuf;
     for (i = 0; i < count && g_nfiles < MAX_FILES; i++) {
-        /* raw entry: 4 bytes len + 4 bytes time + 1 byte attrib + name\0 */
-        fattrib = (unsigned char)p[8];
-        fname   = p + 9;
+        fattrib = (unsigned char)raw[8];
+        fname   = raw + 9;
         namelen = (unsigned short)strlen(fname);
+        raw += 9 + namelen + 1;
 
-        /* advance pointer past this entry */
-        p += 9 + namelen + 1;
-
-        /* skip directories and volume labels */
         if (fattrib & ATTRIB_DIR) continue;
 
-        /* lowercase filename in place */
         for (ci = 0; fname[ci]; ci++) {
             if (fname[ci] >= 'A' && fname[ci] <= 'Z')
                 fname[ci] += 32;
         }
-        /* fname[] is inside req_buf which we own — safe to mutate before File_Open */
 
         if (store_used >= STORE_SIZE) break;
-
         Dir_PathAdd(g_docroot[0] ? g_docroot : 0, fname, g_fspath);
         fh = File_Open(_symbank, g_fspath);
         if (_fileerr) continue;
-
-        File_Seek(fh, 0, SEEK_SET);
         n = 0;
         do {
             room = STORE_SIZE - store_used - n;
@@ -229,9 +233,7 @@ static void load_directory(void)
             n += chunk;
         } while (chunk > 0);
         File_Close(fh);
-
         if (n == 0) continue;
-
         strcpy(g_files[g_nfiles].path, g_fspath);
         g_files[g_nfiles].offset = store_used;
         g_files[g_nfiles].size   = n;
@@ -239,7 +241,6 @@ static void load_directory(void)
         g_nfiles++;
         printf("Cached %s: %u bytes\r\n", fname, n);
     }
-
     printf("Store: %u bytes, %u files\r\n", store_used, (unsigned int)g_nfiles);
 }
 
@@ -373,13 +374,6 @@ int main(int argc, char *argv[])
 
     printf("foal-httpd for SymbOS\r\n");
 
-    /* Prevent double launch */
-    if (App_Search(_symbank, "foal-httpd") != 0) {
-        printf("Already running.\r\n");
-        return 1;
-    }
-    App_Service(_symbank, "foal-httpd");
-
     if (Net_Init() < 0) {
         printf("Error: network daemon not found\r\n");
         return 1;
@@ -405,8 +399,22 @@ int main(int argc, char *argv[])
     /* Keep-alive handle no longer needed after load. */
     File_Close(g_keep_fh);
 
-    /* Add systray icon so foal-httpd appears as a running service. */
-    g_tray_id = Systray_Add(_symbank, (char *)g_tray_icon, 0);
+    if (App_Search(_symbank, "foal-httpd") != 0) {
+        printf("Already running.\r\n");
+        return 1;
+    }
+    App_Service(_symbank, "foal-httpd");
+
+    g_tray_id = -1;
+    g_tray_icon[0] = 2; g_tray_icon[1] = 8; g_tray_icon[2] = 8;
+    g_tray_icon[3]  = '\xf0'; g_tray_icon[4]  = '\x0f'; g_tray_icon[5]  = '\xf6';
+    g_tray_icon[6]  = '\x0f'; g_tray_icon[7]  = '\xf0'; g_tray_icon[8]  = '\x5d';
+    g_tray_icon[9]  = '\x4f'; g_tray_icon[10] = '\xaf'; g_tray_icon[11] = '\x5f';
+    g_tray_icon[12] = '\x2f'; g_tray_icon[13] = '\xab'; g_tray_icon[14] = '\xf0';
+    g_tray_icon[15] = '\x0f'; g_tray_icon[16] = '\xf6'; g_tray_icon[17] = '\x0f';
+    g_tray_icon[18] = '\xf0';
+    g_tray_id = Systray_Add(_symbank, g_tray_icon, _symappid);
+    printf("Tray    : id=%d\r\n", (int)g_tray_id);
 
     printf("Shell   : pid=%u ver=%u\r\n",
            (unsigned int)_shellpid, (unsigned int)_shellver);
@@ -422,10 +430,8 @@ int main(int argc, char *argv[])
         sock = TCP_OpenServer(g_port);
         if (sock < 0) {
             if (_neterr == ERR_CONNECT) {
-                /* Poll for OS quit message (non-blocking). */
                 mresp = Msg_Receive(_sympid, -1, _symmsg);
                 if ((mresp & 1) && _symmsg[0] == 0) break;
-                /* Also allow Q from shell. */
                 if (_shellpid) {
                     c = Shell_CharTest(0, 1);
                     if (c == 'Q' || c == 'q') break;
@@ -447,7 +453,6 @@ int main(int argc, char *argv[])
 
         printf("Done\r\n\r\n");
 
-        /* Poll for OS quit message (non-blocking). */
         mresp = Msg_Receive(_sympid, -1, _symmsg);
         if ((mresp & 1) && _symmsg[0] == 0) break;
         if (_shellpid) {
