@@ -3,7 +3,7 @@
 
 Minimal HTTP/1.0 static file server for [SymbOS](http://symbos.org), written in C using the [SCC compiler](https://github.com/danielgaskell/scc).
 
-> **Proof of concept.** This is a toy server intended for experimentation on retro hardware. It handles one connection at a time, has a fixed 8 KB file cache, and has not been hardened for security or reliability. Do not use it for anything serious.
+> **Proof of concept.** This is a toy server intended for experimentation on retro hardware. It handles one connection at a time, has a fixed 16 KB file cache, and has not been hardened for security or reliability. Do not use it for anything serious.
 
 ## Features
 
@@ -54,7 +54,7 @@ Run from SymShell or the SymbOS file manager. On startup the server scans the do
 
 ## File caching
 
-At startup the server enumerates every file in the docroot using the SymbOS file manager (DIRINP command), caches them all into an 8 KB RAM pool, then closes all file handles. Any file present at startup is served from RAM; files not found return 404. The pool fits roughly 8 KB of content in total (`STORE_SIZE` in `src/httpd.c`).
+At startup the server enumerates every file in the docroot using the SymbOS file manager (DIRINP command), caches them all into a 16 KB RAM pool, then closes all file handles. Any file present at startup is served from RAM; files not found return 404. The pool fits roughly 16 KB of content in total (`STORE_SIZE` in `src/httpd.c`).
 
 ## Limitations
 
@@ -95,4 +95,4 @@ Copy `www/index.htm` to your SymbOS docroot (e.g. `C:\WWW\`) before starting the
 - Requires the SymbOS network daemon to be running
 - SymbOS FAT paths use backslashes and 8.3 filenames (`C:\WWW\index.htm`)
 - All files are read at startup; the USB drive may sleep safely during serving
-- Total RAM pool for cached files: 8 KB (`STORE_SIZE` in `src/httpd.c`)
+- Total RAM pool for cached files: 16 KB (`STORE_SIZE` in `src/httpd.c`)

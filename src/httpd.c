@@ -29,7 +29,7 @@
 #define FILE_BUF_SIZE 512
 #define PATH_SIZE     128
 #define FSPATH_SIZE   200
-#define STORE_SIZE    8192   /* bytes available for all cached file content */
+#define STORE_SIZE    16384  /* bytes available for all cached file content */
 #define MAX_FILES     16     /* max files in the in-memory store */
 
 /* ------------------------------------------------------------------ */
