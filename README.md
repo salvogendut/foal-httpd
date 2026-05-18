@@ -3,6 +3,8 @@
 
 Minimal HTTP/1.0 static file server for [SymbOS](http://symbos.org), written in C using the [SCC compiler](https://github.com/danielgaskell/scc).
 
+> **Proof of concept.** This is a toy server intended for experimentation on retro hardware. It handles one connection at a time, has a fixed 8 KB file cache, and has not been hardened for security or reliability. Do not use it for anything serious.
+
 ## Features
 
 - All files preloaded into RAM at startup — zero disk I/O during requests
