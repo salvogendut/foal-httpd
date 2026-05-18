@@ -13,7 +13,7 @@ Minimal HTTP/1.0 static file server for [SymbOS](http://symbos.org), written in 
 - Directory traversal protection (`..` in paths → 404)
 - Query strings and fragments stripped before path lookup
 - Default document: `index.htm` for `/`
-- HTTP/1.0, `Connection: close` — one connection at a time
+- HTTP/1.0, `Connection: close` — one connection at a time; see [Limitations](#limitations) below
 - Runs as a SymbOS daemon with a systray icon
 - Double-launch guard (second instance exits immediately)
 - Responds to OS quit messages (task manager) and Q key in SymShell
@@ -56,17 +56,39 @@ Run from SymShell or the SymbOS file manager. On startup the server scans the do
 
 At startup the server enumerates every file in the docroot using the SymbOS file manager (DIRINP command), caches them all into an 8 KB RAM pool, then closes all file handles. Any file present at startup is served from RAM; files not found return 404. The pool fits roughly 8 KB of content in total (`STORE_SIZE` in `src/httpd.c`).
 
+## Limitations
+
+This server handles **one connection at a time**. After serving a response it closes the socket and begins listening again. Modern browsers open multiple parallel connections to fetch a page's assets (images, CSS, JS), and those secondary requests arrive while the server is still processing the first one — they get `ERR_CONNECTION_REFUSED`.
+
+**Consequence: images and other assets must be embedded directly in the HTML** as base64 data URIs rather than referenced as separate URLs. The browser then gets everything it needs from the single index page response.
+
+```html
+<!-- Instead of: <img src="logo.jpg"> -->
+<img src="data:image/jpeg;base64,/9j/4AAQ..." alt="logo">
+```
+
+To convert an image on the host machine:
+
+```bash
+python3 -c "
+import base64
+with open('logo.jpg','rb') as f:
+    print('data:image/jpeg;base64,' + base64.b64encode(f.read()).decode())
+"
+```
+
+Paste the output as the `src` attribute value.
+
 ## Sample site
 
 A minimal example site is in `www/`:
 
 ```
 www/
-  index.htm   — sample HTML page (logo embedded as base64 data URI)
-  logo.jpg    — source image (already embedded; not needed on the server)
+  index.htm   — sample HTML page with logo embedded as a base64 data URI
 ```
 
-Copy `www/index.htm` to your SymbOS docroot (e.g. `C:\WWW\`) before starting the server. The logo is embedded directly in the HTML as a base64 data URI, so the browser fetches the complete page — including the image — in a single HTTP request. This avoids the `ERR_CONNECTION_REFUSED` errors that would otherwise occur when a browser fires parallel asset requests against a single-connection HTTP/1.0 server.
+Copy `www/index.htm` to your SymbOS docroot (e.g. `C:\WWW\`) before starting the server.
 
 ## Notes
 
